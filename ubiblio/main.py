@@ -69,6 +69,7 @@ class Settings:
 # initialize tables on first start
 models.Base.metadata.create_all(bind=engine)
 
+#app = FastAPI(title="uBiblio", root_path="/library")
 app = FastAPI()
 favicon_path = 'favicon.ico'
 
@@ -419,6 +420,20 @@ async def addBook_post(request: Request, background_tasks: BackgroundTasks, user
     if await form.is_valid():
         try:
             db = SessionLocal()
+
+            if form.ISBN:
+                # Query the database for an existing book with this ISBN
+                existing_book = db.query(models.Book).filter(models.Book.ISBN == form.ISBN).first()
+                if existing_book:
+                    db.close()
+                    # Return the user to the form with an error message
+                    context = {
+                        "config": crud.getConfig(SessionLocal()),
+                        "user": user,
+                        "request": request,
+                        "errors": [f"Duplicate Entry: This ISBN is already assigned to '{existing_book.title}'."]
+                    }
+                    return templates.TemplateResponse("newBook.html", context)
             newBook = schemas.BookCreate(title=form.title, author=form.author, summary=form.summary, genre=form.genre, library=form.library, shelf=form.shelf, collection=form.collection, notes=form.notes, ISBN = form.ISBN, owned = form.owned, ebook = form.ebook, customField1=form.customField1, customField2=form.customField2, withdrawn=form.withdrawn)
             # 1. Create the book and get the new ID
             created_book = crud.createBook(db, newBook, return_obj=True)
@@ -427,22 +442,41 @@ async def addBook_post(request: Request, background_tasks: BackgroundTasks, user
                 # Schedule the fetch to happen after the response is sent
                 background_tasks.add_task(fetch_and_save_cover, created_book.id, form.ISBN)
             db.close()
-            return RedirectResponse(url='/searchbooks/', 
-        status_code=status.HTTP_302_FOUND)
+            return RedirectResponse(url='/searchbooks/', status_code=status.HTTP_302_FOUND)
         except Exception as e:
             print(e)
             return "Fail"
 
 
 @app.get("/delete_book/{bookId}", dependencies=[get_rate_limiter(times=1, seconds=1)], response_class=HTMLResponse)
-async def delete_book(bookId, request: Request, user: schemas.User = Depends(get_current_user_from_token)):
-    if user.isAdmin == True:
+async def delete_book(bookId: int, request: Request, user: schemas.User = Depends(get_current_user_from_token)):
+    if user.isAdmin:
         db = SessionLocal()
-        crud.deleteBook(db,bookId)
+        
+        # 1. Find all images associated with this book
+        images = crud.getImages(db, bookId)
+        
+        # 2. Delete physical files from the filesystem
+        for img in images:
+            # Construct paths based on your current naming convention
+            base_path = os.path.join('./static/bookImages/', str(img.filename))
+            full_path = base_path + ".jpg"
+            thumb_path = base_path + "_thumbnail.jpg"
+            
+            try:
+                if os.path.exists(full_path):
+                    os.remove(full_path)
+                if os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except Exception as e:
+                logger.error(f"Failed to delete files for image {img.id}: {e}")
+
+        # 3. Delete the book from the database (your CRUD should handle cascading image record deletion)
+        crud.deleteBook(db, bookId)
         db.close()
         return RedirectResponse(url='/searchbooks/')
-    if not user.isAdmin == True:
-        return "You are not authorized to delete books. Only an admin can do this."
+    
+    return "You are not authorized to delete books."
 
 @app.get("/bookDetails/{bookId}", dependencies=[get_rate_limiter(times=1, seconds=1)], response_class=HTMLResponse)
 async def bookDetails(bookId, request: Request, user: schemas.User = Depends(get_current_user_from_token)):
@@ -535,6 +569,24 @@ def scan_book_form(request: Request, user: schemas.User = Depends(get_current_us
     except Exception as e:
         print(e)
         return "An error has occured."
+
+@app.get("/fetch_cover/{bookId}", dependencies=[get_rate_limiter(times=2, seconds=5)], response_class=HTMLResponse)
+async def manual_cover_fetch(bookId: int, background_tasks: BackgroundTasks, user: schemas.User = Depends(get_current_user_from_token)):
+    if not user.isAdmin:
+        return "Unauthorized"
+    
+    db = SessionLocal()
+    book = crud.getBookById(db, bookId)
+    
+    if book and book.ISBN:
+        # We reuse your existing background task logic
+        background_tasks.add_task(fetch_and_save_cover, book.id, book.ISBN)
+        db.close()
+        # Redirect back to the details page with a success message (optional)
+        return RedirectResponse(url=f'/bookDetails/{bookId}', status_code=status.HTTP_302_FOUND)
+    
+    db.close()
+    return "Book not found or has no ISBN."
 
 # Initialize client (Ensure OPENAI_API_KEY is in your .env or environment)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1698,7 +1750,9 @@ class LoginForm:
 
     async def load_data(self):
         form = await self.request.form()
-        self.username = form.get("username")
+        # Normalizing to lowercase here ensures 'Johannah' becomes 'johannah'
+        raw_username = form.get("username")
+        self.username = raw_username.lower().strip() if raw_username else None
         self.password = form.get("password")
 
     async def is_valid(self):

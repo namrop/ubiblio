@@ -72,6 +72,11 @@
 			<div class="panel">
 			<a style="border:none; margin-right:25px;margin-right:25px;" href="/update_book/{{book.id}}"><button>Update</button></a>
 			<a class="confirm" style="border:none;" href="/delete_book/{{book.id}}" onclick="if (!confirm('Are you sure?')) return false;"><button style="margin-top:30px;">Delete</button></a>
+			{% if book.ISBN %}
+				<a style="border:none; margin-right:25px;" href="/fetch_cover/{{book.id}}">
+					<button>Fetch Cover</button>
+				</a>
+			{% endif %}
 		    	{% if config.coverImages %}	
 		
 				
