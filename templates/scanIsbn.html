@@ -88,14 +88,15 @@ function handleAIResult(resultText) {
         // Ensure this matches the exact route uBiblio uses (check main.py if this fails)
         window.location.href = "/isbn/" + encodeURIComponent(cleanedIsbn) + "/scan";
     } 
-    // 2. Handle Title/Author results
+    /* Commenting out step 2 until future implementation // 2. Handle Title/Author results
     else if (text.includes("TITLE") || text.includes("BY")) {
         const query = resultText.replace(/TITLE:/i, "").trim();
         scanMsg.innerHTML = `<strong>Found:</strong> ${query}<br>Searching...`;
         
         // This is the 404 route - we will fix this in Step 2
         window.location.href = "/search?q=" + encodeURIComponent(query);
-    } else {
+    } */ 
+   else {
         scanMsg.textContent = "AI Result: " + resultText;
     }
 }
