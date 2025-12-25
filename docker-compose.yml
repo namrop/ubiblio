@@ -1,0 +1,25 @@
+services:
+  ubiblio:
+    build: .
+    container_name: ubiblio
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_LOCATION=/app/data/ubiblio.db
+      - SECRET_KEY=${UBIBLIO_SECRET_KEY}
+      - TOKEN_TTL=${UBIBLIO_TOKEN_TTL}
+      - ALLOW_REGISTRATION=${UBIBLIO_ALLOW_REGISTRATION}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - /opt/sol/data/ubiblio:/app/data
+      # Map the images folder specifically
+      - /opt/sol/data/ubiblio/bookImages:/app/static/bookImages
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - sol-network
+
+networks:
+  sol-network:
+    external: true
