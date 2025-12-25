@@ -21,6 +21,7 @@ from .database import SessionLocal, engine
 import redis.asyncio as redis
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
+from fastapi import BackgroundTasks # Add this to imports
 import json
 from datetime import datetime
 from isbnlib import *
@@ -33,7 +34,13 @@ import uuid
 import shutil
 from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
 from hashlib import sha256
- 
+import requests
+from io import BytesIO
+
+import logging
+# Use the existing uvicorn logger for instant output
+logger = logging.getLogger("uvicorn.error")
+
 console = Console()
 CHUNK_SIZE = 1024 * 1024 #for uploads
 
@@ -102,6 +109,99 @@ def get_user(username: str) -> schemas.User:
 
 async def get_body(request: Request):
     return await request.body()
+
+def fetch_and_save_cover(bookId: int, isbn: str):
+    clean_isbn = "".join(filter(str.isdigit, isbn))
+    # List of providers and their URL templates
+    providers = [
+        f"https://covers.openlibrary.org/b/isbn/{clean_isbn}-L.jpg?default=false",
+        f"https://www.googleapis.com/books/v1/volumes?q=isbn:{clean_isbn}"
+    ]
+
+    for url in providers:
+        try:
+            logger.info(f"🚀 ATTEMPTING FETCH: {url}")
+
+            # Special handling for Google Books (it returns JSON with a link, not a direct image)
+            if "googleapis.com" in url:
+                res = requests.get(url, timeout=5).json()
+                if res.get("totalItems", 0) > 0:
+                    img_links = res["items"][0]["volumeInfo"].get("imageLinks", {})
+                    # Prefer high-res if available
+                    image_url = img_links.get("extraLarge") or img_links.get("large") or img_links.get("thumbnail")
+                    if not image_url: continue
+                    # Re-fetch the actual image from Google's link
+                    response = requests.get(image_url.replace("http://", "https://"), timeout=10)
+                else: continue
+            else:
+                # Direct image providers (Open Library)
+                response = requests.get(url, timeout=10)
+
+            # Validate response content (ignore small 1x1 placeholders)
+            if response.status_code == 200 and len(response.content) > 2000:
+                db = SessionLocal()
+                unique_id = str(uuid.uuid4())
+                dbpath = f"{bookId}_{unique_id}"
+                basepath = os.path.join('./static/bookImages/', dbpath)
+
+                # Save & Thumbnail logic
+                os.makedirs(os.path.dirname(basepath), exist_ok=True)
+                with open(basepath + ".jpg", 'wb') as f:
+                    f.write(response.content)
+
+                im = Image.open(BytesIO(response.content))
+                im.convert('RGB').thumbnail((300, 300), resample=Image.BOX)
+                im.save(basepath + "_thumbnail.jpg", format='JPEG', quality=75)
+
+                crud.addImage(db, schemas.bookImageBase(bookId=bookId, filename=dbpath))
+                db.close()
+                logger.info(f"✅ SUCCESS: Saved cover from {url}")
+                return True # Stop after first success
+
+        except Exception as e:
+            logger.error(f"⚠️ Provider failed ({url}): {e}")
+            continue
+
+    logger.warning(f"❌ ALL PROVIDERS FAILED for ISBN {isbn}")
+    return False
+
+def save_image_from_url(bookId: int, url: str):
+    logger.info(f"🚀 ATTEMPTING COVER FETCH: Book ID {bookId} from {url}")
+    try:
+        response = requests.get(url, timeout=10)
+        logger.info(f"📡 API STATUS: {response.status_code}")
+        
+        # OpenLibrary returns a 1x1 pixel image if not found by default.
+        # Check size to see if it's a real cover.
+        if response.status_code == 200 and len(response.content) > 1000:
+            db = SessionLocal()
+            unique_id = str(uuid.uuid4())
+            dbpath = f"{bookId}_{unique_id}"
+            basepath = os.path.join('./static/bookImages/', dbpath)
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(basepath), exist_ok=True)
+            
+            filepath = basepath + ".jpg"
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            
+            # Generate Thumbnail
+            im = Image.open(BytesIO(response.content))
+            im.convert('RGB').save(filepath, "JPEG")
+            im.thumbnail((300, 300), resample=Image.BOX)
+            im.save(basepath + "_thumbnail.jpg", format='JPEG', quality=65)
+            
+            newImage = schemas.bookImageBase(bookId=bookId, filename=dbpath)
+            crud.addImage(db, newImage)
+            db.close()
+            logger.info(f"✅ SUCCESS: Saved cover for Book {bookId}")
+            return True
+        else:
+            logger.warning(f"⚠️ NO COVER: URL returned {response.status_code} or small file.")
+    except Exception as e:
+        logger.error(f"❌ FATAL ERROR in save_image_from_url: {str(e)}")
+    return False
 
 # --------------------------------------------------------------------------
 # Authentication logic
@@ -310,7 +410,7 @@ def add_book_form(request: Request, user: schemas.User = Depends(get_current_use
 
 
 @app.post("/add_book", dependencies=[get_rate_limiter(times=2, seconds=2)], response_class=HTMLResponse)
-async def addBook_post(request: Request, user: schemas.User = Depends(get_current_user_from_token)):
+async def addBook_post(request: Request, background_tasks: BackgroundTasks, user: schemas.User = Depends(get_current_user_from_token)):
     if not user.isAdmin == True:
         return "You are not authorized to add books. Only an admin can do this."
     form = bookForm(request)
@@ -319,7 +419,12 @@ async def addBook_post(request: Request, user: schemas.User = Depends(get_curren
         try:
             db = SessionLocal()
             newBook = schemas.BookCreate(title=form.title, author=form.author, summary=form.summary, genre=form.genre, library=form.library, shelf=form.shelf, collection=form.collection, notes=form.notes, ISBN = form.ISBN, owned = form.owned, ebook = form.ebook, customField1=form.customField1, customField2=form.customField2, withdrawn=form.withdrawn)
-            crud.createBook(db, newBook)
+            # 1. Create the book and get the new ID
+            created_book = crud.createBook(db, newBook, return_obj=True)
+            # 2. TRIGGER THE FETCH: If there is an ISBN, get the cover
+            if hasattr(created_book, 'id') and form.ISBN:
+                # Schedule the fetch to happen after the response is sent
+                background_tasks.add_task(fetch_and_save_cover, created_book.id, form.ISBN)
             db.close()
             return RedirectResponse(url='/searchbooks/', 
         status_code=status.HTTP_302_FOUND)

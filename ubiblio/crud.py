@@ -42,13 +42,15 @@ def isAdmin(db: Session, username: str):
         return False
         
 
-
-def createBook(db: Session, book: schemas.Book):
+#adding bool to return the book object
+def createBook(db: Session, book: schemas.Book, return_obj: bool=False):
     try:
         book = models.Book(** book.dict())
         db.add(book)
         db.commit()
         db.refresh(book)
+        if return_obj:
+            return book
         return "True"
     except Exception as e:
         print(e)
