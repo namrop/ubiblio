@@ -36,7 +36,8 @@ from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
 from hashlib import sha256
 import requests
 from io import BytesIO
-
+from openai import OpenAI
+import base64
 import logging
 # Use the existing uvicorn logger for instant output
 logger = logging.getLogger("uvicorn.error")
@@ -535,6 +536,43 @@ def scan_book_form(request: Request, user: schemas.User = Depends(get_current_us
         print(e)
         return "An error has occured."
 
+# Initialize client (Ensure OPENAI_API_KEY is in your .env or environment)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+@app.post("/ai_isbn_lookup")
+async def ai_isbn_lookup(data: dict):
+    raw_image = data.get("image")
+    if not raw_image:
+        return {"error": "No image data received from browser"}
+
+    try:
+        # 1. Decode and Save for diagnostics (Check this file on sol!)
+        image_b64 = raw_image.split(",")[1]
+        with open("/tmp/last_scan.jpg", "wb") as f:
+            f.write(base64.b64decode(image_b64))
+
+        # 2. Call OpenAI
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract ISBN or Title/Author. Return 'ISBN: [number]' or 'TITLE: [title] BY [author]'."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                    ],
+                }
+            ]
+        )
+        
+        ai_text = response.choices[0].message.content.strip()
+        return {"result": ai_text} # Explicitly returning the 'result' key
+
+    except Exception as e:
+        print(f"CRITICAL BACKEND ERROR: {e}")
+        return {"error": str(e)}
+
+        
 # --------------------------------------------------------------------------
 # Search
 # --------------------------------------------------------------------------

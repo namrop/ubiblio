@@ -11,6 +11,9 @@
       <div id="reader" style="width: 100%; max-width: 600px; margin: auto; border: 2px solid #333; border-radius: 8px; overflow: hidden; background: #000;"></div>
       
       <div style="text-align: center; margin-top: 20px;">
+        <button id="aiScanBtn" type="button" style="background-color: #5865F2; color: white; width: 100%; margin-bottom: 10px; border: none; border-radius: 4px; padding: 10px;">
+          🤖 AI Fallback Scan
+        </button>
         <a style="text-decoration:none !important;" href="/addisbn">
           <button type="button">Manual Entry</button>
         </a>
@@ -25,6 +28,80 @@
 <script>
   const scanMsg = document.getElementById('scanMsg');
 
+  //AI scan button listener
+  document.getElementById('aiScanBtn').addEventListener('click', async () => {
+    const scanMsg = document.getElementById('scanMsg');
+    const video = document.querySelector('#reader video'); // Direct target of the video stream
+    
+    if (!video) {
+        scanMsg.textContent = "Error: Camera video stream not found.";
+        return;
+    }
+
+    scanMsg.textContent = "Capturing frame... 📸";
+
+    // 1. Create a temporary canvas to 'capture' the current video frame
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // 2. Convert to Base64 (High quality for AI reading)
+    const imageData = canvas.toDataURL('image/jpeg', 0.9);
+
+    try {
+        scanMsg.textContent = "AI is analyzing... ⏳";
+        const response = await fetch('/ai_isbn_lookup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageData })
+        });
+
+        const data = await response.json();
+        console.log("AI Server Response:", data); // DEBUG: See the full object
+
+        if (data.result) {
+            handleAIResult(data.result); // Process the successful result
+        } else if (data.error) {
+            scanMsg.textContent = "AI Error: " + data.error;
+        } else {
+            scanMsg.textContent = "AI returned an empty response.";
+        }
+    } catch (err) {
+        scanMsg.textContent = "Network Error: " + err.message;
+    }
+});
+
+// Helper to handle the string logic
+function handleAIResult(resultText) {
+    const scanMsg = document.getElementById('scanMsg');
+    const text = resultText.toUpperCase();
+    const numericOnly = resultText.replace(/[^\dX]/gi, "");
+    
+    // 1. Better ISBN Extraction: Look for 10 or 13 digits anywhere in the string
+    const isbnMatch = numericOnly.match(/\d{10,13}/);
+
+    if (isbnMatch) {
+        const cleanedIsbn = isbnMatch[0];
+        scanMsg.textContent = "Redirecting to ISBN: " + cleanedIsbn;
+        // Ensure this matches the exact route uBiblio uses (check main.py if this fails)
+        window.location.href = "/isbn/" + encodeURIComponent(cleanedIsbn) + "/scan";
+    } 
+    // 2. Handle Title/Author results
+    else if (text.includes("TITLE") || text.includes("BY")) {
+        const query = resultText.replace(/TITLE:/i, "").trim();
+        scanMsg.innerHTML = `<strong>Found:</strong> ${query}<br>Searching...`;
+        
+        // This is the 404 route - we will fix this in Step 2
+        window.location.href = "/search?q=" + encodeURIComponent(query);
+    } else {
+        scanMsg.textContent = "AI Result: " + resultText;
+    }
+}
+
+
+
   // Explicitly define the formats to stop the engine from "guessing"
   const formatsToSupport = [
       Html5QrcodeSupportedFormats.EAN_13,
@@ -34,9 +111,23 @@
       Html5QrcodeSupportedFormats.CODE_128
   ];
 
+  function validateAndRedirect(rawCode) {
+    // Strip everything except digits and 'X'
+    const cleanCode = rawCode.replace(/[^\dX]/gi, "");
+    
+    // Only redirect if it's a valid ISBN length
+    if (cleanCode.length === 10 || cleanCode.length === 13) {
+        window.location.href = "/isbn/" + encodeURIComponent(cleanCode) + "/scan";
+    } else {
+        console.warn("Ignoring invalid scan: " + cleanCode);
+        document.getElementById('scanMsg').textContent = "Invalid scan. Try again.";
+    }
+}
+
   function onScanSuccess(decodedText, decodedResult) {
     console.log(`ISBN Detected: ${decodedText}`);
     scanMsg.textContent = "ISBN Found: " + decodedText;
+    validateAndRedirect(decodedText);
     
     html5QrcodeScanner.clear().then(_ => {
         window.location.href = "/isbn/" + encodeURIComponent(decodedText) + "/scan";
